@@ -19,6 +19,7 @@ import android.os.Environment;
 import android.os.ParcelFileDescriptor;
 import android.util.Log;
 import android.support.annotation.Nullable;
+import android.media.AudioManager;
 import org.webrtc.AudioSource;
 import org.webrtc.AudioTrack;
 import org.webrtc.CameraVideoCapturer;
@@ -103,6 +104,7 @@ public class ALWebRTC {
   private VideoTrack mRemoteVideoTrack = null;
   private SurfaceTextureHelper mSurfaceTextureHelper = null;
   private VideoCapturer mVideoCapturer = null;
+  private boolean mVideoCapturerStopped = true;
   private List<IceCandidate> mQueuedRemoteCandidates = null;
   private PeerConnection mPeerConnection = null;
   private DataChannel mDataChannel = null;
@@ -112,6 +114,10 @@ public class ALWebRTC {
   private final SDPObserver mSDPObserver = new SDPObserver();
   private final RemoteProxyVideoSink mRemoteProxyVideoSink = new RemoteProxyVideoSink();
   private final LocalProxyVideoSink mLocalProxyVideoSink = new LocalProxyVideoSink();
+  private boolean mCanRestoreSavedAudioState = false;
+  private int mSavedAudioMode = AudioManager.MODE_INVALID;
+  private boolean mSavedIsSpeakerPhoneOn = false;
+  private boolean mSavedIsMicrophoneMute = false;
   
   public static class PeerConnectionParameters {
     public boolean videoCallEnabled = true; /* Enable video in a call. */
@@ -245,7 +251,7 @@ public class ALWebRTC {
         
   }
                                                                                                    
-  public ALWebRTC(Context appContext, long eglContext, List<PeerConnection.IceServer> iceServers, PeerConnectionParameters peerConnectionParameters) throws ClassNotFoundException, InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
+  public ALWebRTC(Context appContext, android.opengl.EGLContext eglContext, List<PeerConnection.IceServer> iceServers, PeerConnectionParameters peerConnectionParameters) {
     
     /* init local vars */
     mAppContext = appContext;
@@ -253,7 +259,7 @@ public class ALWebRTC {
     mPeerConnectionParameters = peerConnectionParameters;
     mPreferIsac = (mPeerConnectionParameters.audioCodec != null) && 
                   (mPeerConnectionParameters.audioCodec.equals(AUDIO_CODEC_ISAC));
-    mEglBase = EglBase.createEgl14(createSharedEGLContextObj(eglContext), EglBase.CONFIG_PLAIN);   
+    mEglBase = EglBase.createEgl14(eglContext, EglBase.CONFIG_PLAIN);   
     mIceServers = iceServers;
                                     
   }
@@ -417,15 +423,6 @@ public class ALWebRTC {
     mListener = listener;
   } 
           
-  private android.opengl.EGLContext createSharedEGLContextObj(long handle) throws ClassNotFoundException, InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
-    Class<?> classType =Class.forName("android.opengl.EGLContext"); 
-    Class<?>[] types = new Class[] { long.class };
-    Constructor constructor=classType.getDeclaredConstructor(types);
-    constructor.setAccessible(true);     
-    Object object=constructor.newInstance(handle);
-    return (android.opengl.EGLContext) object;
-  }
-
   private @Nullable VideoCapturer createVideoCapturer() {
     final VideoCapturer videoCapturer;
     if (Camera2Enumerator.isSupported(mAppContext)) {
@@ -465,6 +462,29 @@ public class ALWebRTC {
                                                                                 
   public boolean start() throws ClassNotFoundException, InstantiationException, IllegalAccessException, NoSuchMethodException, InvocationTargetException {
     
+    /* exit if already started */
+    if (mPeerConnectionFactory != null) { return mVideoCapturer != null; }
+    
+    // init audioManager
+    AudioManager audioManager = (AudioManager) mAppContext.getSystemService(Context.AUDIO_SERVICE);
+    
+    // Store current audio state so we can restore it when stop() is called.
+    mSavedAudioMode = audioManager.getMode();
+    mSavedIsSpeakerPhoneOn = audioManager.isSpeakerphoneOn();
+    mSavedIsMicrophoneMute = audioManager.isMicrophoneMute();
+    mCanRestoreSavedAudioState = true;
+
+    // By setting MODE_IN_COMMUNICATION as default audio mode. It is
+    // required to be in this mode when playout and/or recording starts for
+    // best possible VoIP performance.
+    audioManager.setMode(AudioManager.MODE_IN_COMMUNICATION);
+
+    // Always disable microphone mute during a WebRTC call.
+    if (mSavedIsMicrophoneMute) { audioManager.setMicrophoneMute(false); }
+
+    /* set the speaker on */
+    if (!mSavedIsSpeakerPhoneOn) { audioManager.setSpeakerphoneOn(true); }
+
     /* create mPeerConnectionFactory */
     mPeerConnectionFactory = createPeerConnectionFactory(new PeerConnectionFactory.Options());
 
@@ -502,6 +522,7 @@ public class ALWebRTC {
       mVideoCapturer.startCapture(mPeerConnectionParameters.videoWidth, /*width*/ 
                                   mPeerConnectionParameters.videoHeight, /*height*/ 
                                   mPeerConnectionParameters.videoFps); /*framerate*/
+      mVideoCapturerStopped = false;
       
       mLocalVideoTrack = mPeerConnectionFactory.createVideoTrack(VIDEO_TRACK_ID, mVideoSource);
       mLocalVideoTrack.setEnabled(true);
@@ -582,8 +603,20 @@ public class ALWebRTC {
   }   
                                                                                 
   public void stop() {
+
+    // Restore previously stored audio states.
+    if (mCanRestoreSavedAudioState) {
+      AudioManager audioManager = (AudioManager) mAppContext.getSystemService(Context.AUDIO_SERVICE);
+      audioManager.setSpeakerphoneOn(mSavedIsSpeakerPhoneOn);
+      audioManager.setMicrophoneMute(mSavedIsMicrophoneMute);
+      audioManager.setMode(mSavedAudioMode);
+      mCanRestoreSavedAudioState = false;
+    }
+
+    //free the objects
     mListener = null;
-    if (mPeerConnectionParameters.aecDump) { mPeerConnectionFactory.stopAecDump(); }
+    if ((mPeerConnectionParameters.aecDump) && 
+        (mPeerConnectionFactory != null)) { mPeerConnectionFactory.stopAecDump(); }
     if (mDataChannel != null) {
       mDataChannel.dispose();
       mDataChannel = null;
@@ -599,9 +632,8 @@ public class ALWebRTC {
     if (mVideoCapturer != null) {
       try {
         mVideoCapturer.stopCapture();
-      } catch (InterruptedException e) {
-        throw new RuntimeException(e);
-      }
+      } catch (InterruptedException e) {}
+      mVideoCapturerStopped = true;
       mVideoCapturer.dispose();
       mVideoCapturer = null;
     }
@@ -613,9 +645,28 @@ public class ALWebRTC {
       mSurfaceTextureHelper.dispose();
       mSurfaceTextureHelper = null;
     }
-    mPeerConnectionFactory.dispose();
-    mPeerConnectionFactory = null;
+    if (mPeerConnectionFactory != null) {
+      mPeerConnectionFactory.dispose();
+      mPeerConnectionFactory = null;
+    }
     mEglBase.release();
+    
+  }
+  
+  public void pauseVideoCapturer() {
+    if (mVideoCapturerStopped) { return; }
+    try {
+      mVideoCapturer.stopCapture();
+    } catch (InterruptedException e) {}
+    mVideoCapturerStopped = true;
+  }
+  
+  public void resumeVideoCapturer() {
+    if (!mVideoCapturerStopped) { return; }
+    mVideoCapturer.startCapture(mPeerConnectionParameters.videoWidth, /*width*/ 
+                                mPeerConnectionParameters.videoHeight, /*height*/ 
+                                mPeerConnectionParameters.videoFps); /*framerate*/
+    mVideoCapturerStopped = false;
   }
   
   public void setAudioEnabled(final boolean enable) {

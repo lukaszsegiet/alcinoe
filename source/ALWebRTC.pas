@@ -38,6 +38,7 @@ uses System.sysUtils,
      Androidapi.JNIBridge,
      FMX.Types3D,
      ALAndroidWebRTCApi,
+     ALFmxTypes3D,
      {$ELSEIF defined(IOS)}
      System.syncObjs,
      System.generics.collections,
@@ -137,8 +138,8 @@ type
     dataChannelNegotiated: boolean; // Negotiated.
     dataChannelId: integer; // data channel id.
     class function Create(const aVideoCallEnabled: boolean = true;
-                          const aVideoWidth: integer = 1920;
-                          const aVideoHeight: integer = 1080;
+                          const aVideoWidth: integer = 1280;
+                          const aVideoHeight: integer = 720;
                           const aVideoFps: integer = 0;
                           const aVideoMaxBitrate: integer = 0;
                           const aVideoCodec: String = 'VP8';
@@ -157,7 +158,6 @@ type
                           const aDataChannelNegotiated: boolean = false;
                           const aDataChannelId: integer = -1): TALWebRTCPeerConnectionParameters; static;
   end;
-
 
   {$REGION ' IOS'}
   {$IF defined(ios)}
@@ -242,6 +242,7 @@ type
     fPeerConnection: RTCPeerConnection;
     fPeerConnectionDelegate: TPeerConnectionDelegate;
     fCameraVideoCapturer: RTCCameraVideoCapturer;
+    fCameraVideoCapturerStopped: Boolean;
     fVideoSource: RTCVideoSource;
     fLocalAudioTrack: RTCAudioTrack;
     fLocalVideoTrack: RTCVideoTrack;
@@ -267,6 +268,8 @@ type
     destructor Destroy; override;
     function Start: boolean;
     procedure Stop;
+    procedure resumeVideoCapturer;
+    procedure pauseVideoCapturer;
     procedure createOffer;
     procedure createAnswer;
     procedure setRemoteDescription(const aSdpType: TALWebRTCSDPType; const aSdpDescription: String);
@@ -325,10 +328,10 @@ type
     {$IF defined(android)}
     fAndroidWebRTCListener: TAndroidWebRTCListener;
     fAndroidWebRTC: JALWebRTC;
-    fLocalBitmap: TTexture;
-    fRemoteBitmap: TTexture;
-    function getLocalBitmap: TTexture;
-    function getRemoteBitmap: TTexture;
+    fLocalBitmap: TALTexture;
+    fRemoteBitmap: TALTexture;
+    function getLocalBitmap: TALTexture;
+    function getRemoteBitmap: TALTexture;
     {$ENDIF}
     {$ENDREGION}
 
@@ -339,6 +342,13 @@ type
     fRemoteBitmap: TALPlanarTexture;
     function getLocalBitmap: TALBiPlanarTexture;
     function getRemoteBitmap: TALPlanarTexture;
+    {$ENDIF}
+    {$ENDREGION}
+
+    {$REGION ' MSWINDOWS / _MACOS'}
+    {$IF defined(MSWINDOWS) or defined(_MACOS)}
+    function getLocalBitmap: Tbitmap;
+    function getRemoteBitmap: Tbitmap;
     {$ENDIF}
     {$ENDREGION}
 
@@ -358,8 +368,8 @@ type
 
     {$REGION ' ANDROID'}
     {$IF defined(android)}
-    property LocalBitmap: TTexture read getLocalBitmap;
-    property RemoteBitmap: TTexture read getRemoteBitmap;
+    property LocalBitmap: TALTexture read getLocalBitmap;
+    property RemoteBitmap: TALTexture read getRemoteBitmap;
     {$ENDIF}
     {$ENDREGION}
 
@@ -370,11 +380,21 @@ type
     {$ENDIF}
     {$ENDREGION}
 
+    {$REGION ' MSWINDOWS / _MACOS'}
+    {$IF defined(MSWINDOWS) or defined(_MACOS)}
+    property LocalBitmap: Tbitmap read getLocalBitmap;
+    property RemoteBitmap: Tbitmap read getRemoteBitmap;
+    {$ENDIF}
+    {$ENDREGION}
+
+
   public
     constructor Create(const aIceServers: TALWebRTCIceServers; const aPeerConnectionParameters: TALWebRTCPeerConnectionParameters); virtual;
     destructor Destroy; override;
     function Start: boolean;
     procedure Stop;
+    procedure resumeVideoCapturer;
+    procedure pauseVideoCapturer;
     procedure createOffer;
     procedure createAnswer;
     procedure setRemoteDescription(const aSdpType: TALWebRTCSDPType; const aSdpDescription: String);
@@ -403,9 +423,8 @@ uses System.messaging,
      Androidapi.JNI.GraphicsContentViewText,
      Androidapi.jni,
      Androidapi.jni.App,
+     Androidapi.JNI.OpenGL,
      Androidapi.Helpers,
-     FMX.Context.GLES.Android,
-     ALFMXTypes3D,
      {$ELSEIF defined(IOS)}
      system.math,
      Macapi.Helpers,
@@ -446,8 +465,8 @@ end;
 
 {**********************************************************************************************}
 class function TALWebRTCPeerConnectionParameters.Create(const aVideoCallEnabled: boolean = true;
-                                                        const aVideoWidth: integer = 1920;
-                                                        const aVideoHeight: integer = 1080;
+                                                        const aVideoWidth: integer = 1280;
+                                                        const aVideoHeight: integer = 720;
                                                         const aVideoFps: integer = 0;
                                                         const aVideoMaxBitrate: integer = 0;
                                                         const aVideoCodec: String = 'VP8';
@@ -571,11 +590,11 @@ begin
 
 
     fLocalbitmap := TALTexture.Create;
-    TALTexture(fLocalbitmap).isExternalOES := true;
+    fLocalbitmap.Material := TalTexture.DefExternalOESMaterial;
     fLocalbitmap.Style := fLocalbitmap.Style - [TTextureStyle.MipMaps];
     //-----
     fRemotebitmap := TALTexture.Create;
-    TALTexture(fRemotebitmap).isExternalOES := true;
+    fRemotebitmap.Material := TalTexture.DefExternalOESMaterial;
     fRemotebitmap.Style := fRemotebitmap.Style - [TTextureStyle.MipMaps];
     //-----
     fAndroidWebRTC := nil;
@@ -612,7 +631,7 @@ begin
     aJPeerConnectionParameters.DataChannelId := aPeerConnectionParameters.DataChannelId;
     //-----
     fAndroidWebRTC := TJALWebRTC.Wrap(TJALWebRTC.JavaClass.init(TAndroidHelper.Context.getApplicationContext,
-                                                                int64(TCustomAndroidContext(TContext3D.CurrentContext).SharedContext),
+                                                                TJEGL14.JavaClass.eglGetCurrentContext,
                                                                 aJListIceServers,
                                                                 aJPeerConnectionParameters));
     fAndroidWebRTCListener := TAndroidWebRTCListener.Create(Self);
@@ -627,9 +646,9 @@ begin
   {$REGION ' IOS'}
   {$IF defined(ios)}
 
-    fLocalbitmap := TALBiPlanarTexture.Create(true{aVolatile});
+    fLocalbitmap := TALBiPlanarTexture.Create;
     //-----
-    fRemotebitmap := TALPlanarTexture.Create(true{aVolatile});
+    fRemotebitmap := TALPlanarTexture.Create;
     _InitTexture(fRemotebitmap);
     _InitTexture(fRemotebitmap.SecondTexture);
     _InitTexture(fRemotebitmap.ThirdTexture);
@@ -674,7 +693,6 @@ begin
 
 end;
 
-
 {********************************}
 function TALWebRTC.Start: boolean;
 
@@ -685,6 +703,10 @@ var aNativeWin: JWindow;
 {$ENDREGION}
 
 begin
+
+  {$IFDEF DEBUG}
+  allog('TALWebRTC.Start', 'ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
+  {$ENDIF}
 
   {$REGION ' ANDROID'}
   {$IF defined(android)}
@@ -728,6 +750,10 @@ var aNativeWin: JWindow;
 
 begin
 
+  {$IFDEF DEBUG}
+  allog('TALWebRTC.Stop', 'ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
+  {$ENDIF}
+
   {$REGION ' ANDROID'}
   {$IF defined(android)}
 
@@ -751,6 +777,50 @@ begin
       fiOSWebRTC := nil; // as fWebRTC have freeOnTerminate = True, it's will free up the memory it's use by himself
     end;
     TiOSHelper.SharedApplication.setIdleTimerDisabled(false);
+
+  {$ENDIF}
+  {$ENDREGION}
+
+end;
+
+{**************************************}
+procedure TALWebRTC.resumeVideoCapturer;
+begin
+
+  {$REGION ' ANDROID'}
+  {$IF defined(android)}
+
+    fAndroidWebRTC.resumeVideoCapturer;
+
+  {$ENDIF}
+  {$ENDREGION}
+
+  {$REGION ' IOS'}
+  {$IF defined(ios)}
+
+    fiOSWebRTC.resumeVideoCapturer;
+
+  {$ENDIF}
+  {$ENDREGION}
+
+end;
+
+{************************************}
+procedure TALWebRTC.pauseVideoCapturer;
+begin
+
+  {$REGION ' ANDROID'}
+  {$IF defined(android)}
+
+    fAndroidWebRTC.pauseVideoCapturer;
+
+  {$ENDIF}
+  {$ENDREGION}
+
+  {$REGION ' IOS'}
+  {$IF defined(ios)}
+
+    fiOSWebRTC.pauseVideoCapturer;
 
   {$ENDIF}
   {$ENDREGION}
@@ -979,7 +1049,6 @@ begin
   {$ENDIF}
   {$ENDREGION}
 
-
   {$REGION ' MSWINDOWS / _MACOS'}
   {$IF defined(MSWINDOWS) or defined(_MACOS)}
 
@@ -1145,15 +1214,15 @@ begin
 
 end;
 
-{******************************************}
-function TALWebRTC.getLocalBitmap: TTexture;
+{********************************************}
+function TALWebRTC.getLocalBitmap: TALTexture;
 begin
   if fLocalBitmap.Handle = 0 then result := nil
   else result := fLocalBitmap;
 end;
 
-{*******************************************}
-function TALWebRTC.getRemoteBitmap: TTexture;
+{*********************************************}
+function TALWebRTC.getRemoteBitmap: TALTexture;
 begin
   if fRemoteBitmap.Handle = 0 then result := nil
   else result := fRemoteBitmap;
@@ -1167,10 +1236,11 @@ end;
 
 {********************************************************************************************************************************************************************}
 constructor TALiOSWebRTC.Create(const aWebRTC: TALWebRTC; const aIceServers: TALWebRTCIceServers; const aPeerConnectionParameters: TALWebRTCPeerConnectionParameters);
+Var LwebRTCConfig: RTCAudioSessionConfiguration;
 begin
 
   {$IFDEF DEBUG}
-  allog('TALiOSWebRTC.Create', 'TALiOSWebRTC.Create - ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
+  allog('TALiOSWebRTC.Create', 'ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
   {$ENDIF}
 
   FreeOnTerminate := True;
@@ -1195,6 +1265,7 @@ begin
   fPeerConnection := nil;
   fPeerConnectionDelegate := nil;
   fCameraVideoCapturer := nil;
+  fCameraVideoCapturerStopped := true;
   fVideoSource := nil;
   fLocalAudioTrack := nil;
   fLocalVideoTrack := nil;
@@ -1205,6 +1276,10 @@ begin
   fQueuedRemoteCandidates := nil;
   fIsInitiator := False;
   //-----
+  LwebRTCConfig := TRTCAudioSessionConfiguration.Wrap(TRTCAudioSessionConfiguration.OCClass.webRTCConfiguration);
+  LwebRTCConfig.setCategoryOptions(LwebRTCConfig.CategoryOptions or AVAudioSessionCategoryOptionDefaultToSpeaker);
+  TRTCAudioSessionConfiguration.OCClass.setWebRTCConfiguration(LwebRTCConfig);
+  //-----
   inherited Create(False); // see http://www.gerixsoft.com/blog/delphi/fixing-symbol-resume-deprecated-warning-delphi-2010
 
 end;
@@ -1214,7 +1289,7 @@ destructor TALiOSWebRTC.Destroy;
 begin
 
   {$IFDEF DEBUG}
-  allog('TALiOSWebRTC.Destroy', 'TALiOSWebRTC.Destroy - ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
+  allog('TALiOSWebRTC.Destroy', 'ThreadID: ' + alIntToStrU(TThread.Current.ThreadID) + '/' + alIntToStrU(MainThreadID), TalLogType.verbose);
   {$ENDIF}
 
   if not terminated then begin
@@ -1284,6 +1359,10 @@ begin
     End;
   end;
 
+  {$IFDEF DEBUG}
+  allog('TALiOSWebRTC.Execute', 'Terminating', TalLogType.verbose);
+  {$ENDIF}
+
   //release all retained object
   //-----
   if fpeerConnection <> nil then begin
@@ -1293,6 +1372,7 @@ begin
   //-----
   if fCameraVideoCapturer <> nil then begin
     fCameraVideoCapturer.stopCapture;
+    fCameraVideoCapturerStopped := true;
     fCameraVideoCapturer.release; // << was created - taken from TRTCCameraVideoCapturer.OCClass.alloc.initWithDelegate(fVideoSource)
     fCameraVideoCapturer := nil;
   end;
@@ -1391,6 +1471,9 @@ begin
         aTransceiver: RTCRtpTransceiver;
         i: integer;
     begin
+
+      //exit if already started
+      if fPeerConnectionFactory <> nil then exit;
 
       //init fPeerConnectionFactory
       aDecoderFactory := TRTCDefaultVideoDecoderFactory.Wrap(TRTCDefaultVideoDecoderFactory.Wrap(TRTCDefaultVideoDecoderFactory.OCClass.alloc).init);
@@ -1539,6 +1622,7 @@ begin
           fCameraVideoCapturer.startCaptureWithDeviceFormatFps(aCaptureDevice, // device: AVCaptureDevice;
                                                                aCaptureDeviceFormat, // format: AVCaptureDeviceFormat;
                                                                selectFpsForFormat(aCaptureDeviceFormat)); // fps: NSInteger)
+          fCameraVideoCapturerStopped := False;
 
           // We can set up rendering for the remote track right away since the transceiver already has an
           // RTCRtpReceiver with a track. The track will automatically get unmuted and produce frames
@@ -1572,6 +1656,41 @@ end;
 procedure TALiOSWebRTC.Stop;
 begin
   Terminate;
+end;
+
+{*****************************************}
+procedure TALiOSWebRTC.resumeVideoCapturer;
+begin
+
+  Enqueue(
+    Procedure
+    var aCaptureDevice: AVCaptureDevice;
+        aCaptureDeviceFormat: AVCaptureDeviceFormat;
+    begin
+      if not fCameraVideoCapturerStopped then exit;
+      aCaptureDevice := findDeviceForPosition(AVCaptureDevicePositionFront);
+      aCaptureDeviceFormat := selectFormatForDevice(aCaptureDevice, fCameraVideoCapturer.PreferredOutputPixelFormat);
+      if aCaptureDeviceFormat = nil then raise Exception.Create('No valid formats for device');
+      fCameraVideoCapturer.startCaptureWithDeviceFormatFps(aCaptureDevice, // device: AVCaptureDevice;
+                                                           aCaptureDeviceFormat, // format: AVCaptureDeviceFormat;
+                                                           selectFpsForFormat(aCaptureDeviceFormat)); // fps: NSInteger)
+      fCameraVideoCapturerStopped := False;
+    end);
+
+end;
+
+{****************************************}
+procedure TALiOSWebRTC.pauseVideoCapturer;
+begin
+
+  Enqueue(
+    Procedure
+    begin
+      if fCameraVideoCapturerStopped then exit;
+      fCameraVideoCapturer.stopCapture;
+      fCameraVideoCapturerStopped := true;
+    end);
+
 end;
 
 {*********************************}
@@ -2380,8 +2499,8 @@ begin
     glBindTexture(GL_TEXTURE_2D, 0);
 
     //-----
-    {$IF CompilerVersion > 32} // tokyo
-      {$MESSAGE WARN 'Check if this is still true and adjust the IFDEF'}
+    {$IF CompilerVersion > 33} // rio
+      {$MESSAGE WARN 'Check if FMX.Types3D.TTexture.SetSize is still the same and adjust the IFDEF'}
     {$ENDIF}
     TALTextureAccessPrivate(fiOSWebRTC.fWebRTC.FLocalBitmap).FWidth := aLumaWidth;
     TALTextureAccessPrivate(fiOSWebRTC.fWebRTC.FLocalBitmap).FHeight := aLumaHeight; // we can't use setsize because it's fill finalise the texture
@@ -2552,6 +2671,24 @@ end;
 {$ENDIF}
 {$ENDREGION}
 
+{$REGION ' MSWINDOWS / _MACOS'}
+{$IF defined(MSWINDOWS) or defined(_MACOS)}
+
+{*****************************************}
+function TALWebRTC.getLocalBitmap: Tbitmap;
+begin
+  result := nil;
+end;
+
+{******************************************}
+function TALWebRTC.getRemoteBitmap: Tbitmap;
+begin
+  result := nil;
+end;
+
+{$ENDIF}
+{$ENDREGION}
+
 Type
 
   {*******************************************}
@@ -2594,7 +2731,6 @@ begin
   {$ENDIF}
   {$ENDREGION}
 
-
   {$REGION ' IOS'}
   {$IF defined(ios)}
 
@@ -2632,7 +2768,6 @@ begin
 
   {$ENDIF}
   {$ENDREGION}
-
 
 end;
 
